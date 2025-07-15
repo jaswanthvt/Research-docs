@@ -1,0 +1,200 @@
+Absolutely — **modularizing socket handling** is a best practice. We'll create a **separate source file** for UDP socket operations, keeping your `main()` clean and focused on ATP behavior.
+
+---
+
+## ✅ Modular Design
+
+### 🔧 Files:
+
+```
+atp_simulator/
+├── atp_simulator.c         // Main ATP logic (threaded request handler)
+├── udp_socket.c            // Socket initialization and wrappers
+├── udp_socket.h            // Header for socket functions
+├── atp_protocol.h          // Shared structs and enums
+└── Makefile
+```
+
+---
+
+## 📄 `udp_socket.h`
+
+```c
+#ifndef UDP_SOCKET_H
+#define UDP_SOCKET_H
+
+#include <netinet/in.h>
+
+int create_udp_server_socket(int port);
+int udp_receive(int sockfd, void *buffer, int buffer_size, struct sockaddr_in *client_addr, socklen_t *client_len);
+int udp_send(int sockfd, void *buffer, int buffer_size, struct sockaddr_in *client_addr, socklen_t client_len);
+
+#endif
+```
+
+---
+
+## 📄 `udp_socket.c`
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include "udp_socket.h"
+
+int create_udp_server_socket(int port) {
+    int sockfd;
+    struct sockaddr_in server_addr;
+
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
+
+    if (bind(sockfd, (const struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    return sockfd;
+}
+
+int udp_receive(int sockfd, void *buffer, int buffer_size, struct sockaddr_in *client_addr, socklen_t *client_len) {
+    return recvfrom(sockfd, buffer, buffer_size, 0,
+                    (struct sockaddr *)client_addr, client_len);
+}
+
+int udp_send(int sockfd, void *buffer, int buffer_size, struct sockaddr_in *client_addr, socklen_t client_len) {
+    return sendto(sockfd, buffer, buffer_size, 0,
+                  (const struct sockaddr *)client_addr, client_len);
+}
+```
+
+---
+
+## 📄 Modified `atp_simulator.c`
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+#include "atp_protocol.h"
+#include "udp_socket.h"
+
+#define PORT 8885
+#define BUFFER_SIZE 1024
+
+void *handle_request(void *arg) {
+    int sockfd = *((int *)arg);
+    free(arg);
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    char buffer[BUFFER_SIZE];
+
+    int n = udp_receive(sockfd, buffer, BUFFER_SIZE, &client_addr, &client_len);
+    if (n < sizeof(InterCompMessageSharedStruct)) {
+        fprintf(stderr, "[ATP] Invalid message size: %d\n", n);
+        return NULL;
+    }
+
+    InterCompMessageSharedStruct *reqHeader = (InterCompMessageSharedStruct *)buffer;
+    printf("[ATP] Received message ID: %d from component %d\n",
+           reqHeader->messageID, reqHeader->senderComponent);
+
+    // Prepare response
+    OCM_task_complete_Rsp rsp = {0};
+    rsp.interCompMessageSharedStruct.messageID = reqHeader->messageID + 1000;
+    rsp.interCompMessageSharedStruct.senderComponent = 2; // ATP ID
+    rsp.interCompMessageSharedStruct.destinationComponent = reqHeader->senderComponent;
+    rsp.interCompMessageSharedStruct.messageSize = sizeof(rsp);
+
+    switch (reqHeader->messageID) {
+        case INTERCOMP_MSG_ID_OCM2_INIT:
+            rsp.taskType = INIT_HANDLER;
+            break;
+        case INTERCOMP_MSG_ID_GTP_AL_START:
+            rsp.taskType = START_HANDLER;
+            break;
+        case INTERCOMP_MSG_ID_PDCP_TX_RESET:
+            rsp.taskType = RESTART_HANDLER;
+            break;
+        case INTERCOMP_MSG_ID_OCM2_DESTROY:
+            rsp.taskType = SHUTDOWN_HANDLER;
+            break;
+        default:
+            rsp.taskType = CONFIGURE_DEBUG_AND_LOG_HANDLER;
+    }
+
+    udp_send(sockfd, &rsp, sizeof(rsp), &client_addr, client_len);
+    printf("[ATP] Responded with taskType: %d\n", rsp.taskType);
+
+    return NULL;
+}
+
+int main() {
+    printf("[ATP] Starting ATP simulator...\n");
+    int sockfd = create_udp_server_socket(PORT);
+
+    while (1) {
+        pthread_t tid;
+        int *sock_arg = malloc(sizeof(int));
+        *sock_arg = sockfd;
+
+        if (pthread_create(&tid, NULL, handle_request, sock_arg) != 0) {
+            perror("Thread creation failed");
+            continue;
+        }
+        pthread_detach(tid);
+    }
+
+    close(sockfd);
+    return 0;
+}
+```
+
+---
+
+## 📄 Updated `Makefile`
+
+```make
+CC = gcc
+CFLAGS = -Wall -pthread
+
+all: atp_simulator
+
+atp_simulator: atp_simulator.c udp_socket.c
+	$(CC) $(CFLAGS) -o atp_simulator atp_simulator.c udp_socket.c
+
+clean:
+	rm -f atp_simulator
+```
+
+---
+
+## ✅ How to Run
+
+```bash
+make
+./atp_simulator
+```
+
+Send a test message (e.g., INIT):
+
+```bash
+python3 -c 'import socket, struct; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(struct.pack("4i", 1001, 10, 2, 16), ("127.0.0.1", 8885))'
+```
+
+---
+
+Would you like me to package this as a zip file or add logging, error handling, or structured message parsing next?
