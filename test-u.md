@@ -195,4 +195,189 @@ python3 -c 'import socket, struct; s=socket.socket(socket.AF_INET, socket.SOCK_D
 
 ---
 
-Would you like me to package this as a zip file or add logging, error handling, or structured message parsing next?
+Great — you're asking **how to take GTest logic like `WaitAndSendInitOrStartResponse()`**, which mocks ATP behavior in a test, and **repurpose it into a real ATP simulator in C**, running as a **standalone process** (not a test anymore).
+
+---
+
+## ✅ What That GTest Code Does
+
+Inside `WaitAndSendInitOrStartResponse()`:
+
+* A UDP socket listens for an INIT or START message.
+* It receives a message (probably `InterCompMessageSharedStruct`).
+* It sends a mock response (`OCM_task_complete_Rsp`) back to the sender.
+
+---
+
+## 🚀 Your Goal in C
+
+You're replicating this behavior as an **ATP process**, in plain C, without GTest.
+
+---
+
+## ✅ Step-by-Step: Repurpose `WaitAndSendInitOrStartResponse()` into C ATP Simulator
+
+---
+
+### 🧱 Step 1: Understand the GTest Function (Simplified)
+
+Let’s assume the C++ test looked like:
+
+```cpp
+void WaitAndSendInitOrStartResponse(uint32_t mSec) {
+    // 1. Wait for INIT message
+    auto msg = socket.recv();
+    
+    // 2. Build OCM_task_complete_Rsp with taskType = INIT_HANDLER
+    OCM_task_complete_Rsp rsp;
+    rsp.taskType = INIT_HANDLER;
+
+    // 3. Send back to sender (ACP)
+    socket.send(rsp);
+}
+```
+
+You want to do **this logic in C**, using raw UDP sockets.
+
+---
+
+### ✅ Step 2: C Implementation
+
+Below is a minimal **C version of that GTest function logic**, running as a **standalone executable**.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define INIT_PORT 8885
+#define BUFFER_SIZE 1024
+
+// Enums and structs based on your earlier images
+
+typedef enum {
+    INIT_HANDLER = 0,
+    START_HANDLER,
+    UPDATE_DYNAMIC_CONFIG_HANDLER,
+    RESTART_HANDLER,
+    SHUTDOWN_HANDLER,
+    CONFIGURE_DEBUG_AND_LOG_HANDLER
+} API_Names;
+
+typedef struct {
+    int messageID;
+    int senderComponent;
+    int destinationComponent;
+    int messageSize;
+} InterCompMessageSharedStruct;
+
+typedef struct {
+    InterCompMessageSharedStruct interCompMessageSharedStruct;
+    API_Names taskType;
+} OCM_task_complete_Rsp;
+
+int main() {
+    int sockfd;
+    struct sockaddr_in atp_addr, acp_addr;
+    socklen_t acp_len = sizeof(acp_addr);
+    char recv_buffer[BUFFER_SIZE];
+
+    // 1. Create UDP socket
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("socket() failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // 2. Bind to INIT_PORT
+    memset(&atp_addr, 0, sizeof(atp_addr));
+    atp_addr.sin_family = AF_INET;
+    atp_addr.sin_addr.s_addr = INADDR_ANY;
+    atp_addr.sin_port = htons(INIT_PORT);
+
+    if (bind(sockfd, (struct sockaddr *)&atp_addr, sizeof(atp_addr)) < 0) {
+        perror("bind() failed");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("[ATP] Waiting for INIT or START message on port %d...\n", INIT_PORT);
+
+    // 3. Wait and receive
+    int n = recvfrom(sockfd, recv_buffer, BUFFER_SIZE, 0,
+                     (struct sockaddr *)&acp_addr, &acp_len);
+    if (n < sizeof(InterCompMessageSharedStruct)) {
+        fprintf(stderr, "[ATP] Received too-small message.\n");
+        close(sockfd);
+        return 1;
+    }
+
+    InterCompMessageSharedStruct *incoming = (InterCompMessageSharedStruct *)recv_buffer;
+
+    printf("[ATP] Received messageID = %d from sender = %d\n",
+           incoming->messageID, incoming->senderComponent);
+
+    // 4. Build and send response
+    OCM_task_complete_Rsp rsp;
+    memset(&rsp, 0, sizeof(rsp));
+
+    rsp.interCompMessageSharedStruct.messageID = incoming->messageID + 1000; // Arbitrary
+    rsp.interCompMessageSharedStruct.senderComponent = 2; // ATP component ID
+    rsp.interCompMessageSharedStruct.destinationComponent = incoming->senderComponent;
+    rsp.interCompMessageSharedStruct.messageSize = sizeof(rsp);
+
+    // Select appropriate taskType based on messageID
+    if (incoming->messageID == 1001) {
+        rsp.taskType = INIT_HANDLER;
+    } else if (incoming->messageID == 1002) {
+        rsp.taskType = START_HANDLER;
+    } else {
+        rsp.taskType = CONFIGURE_DEBUG_AND_LOG_HANDLER;
+    }
+
+    // 5. Send response back
+    sendto(sockfd, &rsp, sizeof(rsp), 0,
+           (struct sockaddr *)&acp_addr, acp_len);
+
+    printf("[ATP] Sent taskType %d as response\n", rsp.taskType);
+
+    close(sockfd);
+    return 0;
+}
+```
+
+---
+
+### ✅ Build and Run
+
+Save as `atp_wait_response.c`:
+
+```bash
+gcc -o atp_simulator atp_wait_response.c
+./atp_simulator
+```
+
+Then send a test message using Python:
+
+```bash
+# Simulate ACP sending INIT (messageID = 1001)
+python3 -c 'import socket, struct; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(struct.pack("4i", 1001, 10, 2, 16), ("127.0.0.1", 8885))'
+```
+
+---
+
+## ✅ Summary
+
+| GTest Mock         | C ATP Simulator              |
+| ------------------ | ---------------------------- |
+| `WaitAndSend...()` | `recvfrom()`, `sendto()`     |
+| Mocked response    | Real UDP response            |
+| Test thread        | Real server loop (or thread) |
+| Controlled timing  | Blocking socket I/O          |
+
+---
+
+Would you like this wrapped into a **modular C app with multiple handlers**, or want me to show how to unit test this ATP logic?
+
