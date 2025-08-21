@@ -347,3 +347,11 @@ log "Tarball ready:    $OUT_TAR"
 echo
 echo "Next steps (connected host): copy the tarball to your removable disk."
 echo "On the air-gapped host: extract to /opt/localrepos, drop sample-offline.repo into /etc/yum.repos.d/, then 'dnf makecache' and install 'foreman-installer'."
+
+
+
+./make-foreman-offline-mirror.sh /srv/foreman-mirror \
+  --with-epel \
+  --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
+  --puppet-release-url "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm"
+
