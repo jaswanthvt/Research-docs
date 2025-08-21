@@ -113,17 +113,19 @@ install_tools() {
 }
 
 select_reposync() {
-  # On AL10, reposync is typically `dnf5 reposync` from dnf5-plugins.
-  if command -v reposync >/dev/null 2>&1; then
-    REPOSYNC=(reposync)
-  elif command -v dnf5 >/dev/null 2>&1 && dnf5 --help 2>&1 | grep -qi reposync; then
+  if command -v dnf5 >/dev/null 2>&1 && dnf5 --help 2>&1 | grep -qi reposync; then
     REPOSYNC=(dnf5 reposync)
+    DEST_OPT="--destdir"          # DNF5
+  elif command -v reposync >/dev/null 2>&1; then
+    REPOSYNC=(reposync)
+    DEST_OPT="--download-path"    # dnf-plugins-core
   elif command -v dnf >/dev/null 2>&1 && dnf --help 2>&1 | grep -qi reposync; then
     REPOSYNC=(dnf reposync)
+    DEST_OPT="--download-path"    # dnf-plugins-core
   else
-    die "No reposync found. Install dnf5-plugins (DNF5) or dnf-plugins-core (fallback)."
+    die "No reposync found. Install dnf5-plugins (DNF5) or dnf-plugins-core (DNF4)."
   fi
-  log "Using reposync command: ${REPOSYNC[*]}"
+  log "Using reposync command: ${REPOSYNC[*]} (dest flag: $DEST_OPT)"
 }
 
 enable_base_repos() {
