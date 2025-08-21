@@ -5,29 +5,27 @@ set -euo pipefail
 # Hybrid Foreman/Puppet offline bundle for AlmaLinux 9/10
 # - FULL mirror: Foreman & Puppet repos
 # - MINIMAL bundle: only deps needed from BaseOS/AppStream/CRB/EPEL
-#=========================================================
-# Usage:
-#   ./make-foreman-hybrid-bundle.sh <dest_dir> [options]
 #
-# Examples (EL10):
-#   ./make-foreman-hybrid-bundle.sh /srv/foreman-hybrid \
+# Usage (AL10 example):
+#   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
 #     --with-epel \
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
 #     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm"
 #
-# Examples (EL9):
-#   ./make-foreman-hybrid-bundle.sh /srv/foreman-hybrid \
+# Usage (AL9 example):
+#   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
 #     --with-epel \
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el9/x86_64/foreman-release.rpm" \
 #     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-9.noarch.rpm"
 #
-# Output layout:
-#   dest/
+# Output:
+#   <dest>/
 #     foreman/   (FULL mirror)
 #     puppet/    (FULL mirror)
-#     minimal/   (ONLY rpms for foreman-installer + puppet-agent and deps)
+#     minimal/   (ONLY rpms for foreman-installer + puppet-agent [+ optional foreman-proxy])
 #     README-offline.txt
 #     sample-offline.repo
+#     <dest>-YYYYMMDD-HHMMSS.tar
 #=========================================================
 
 #-----------------------------
@@ -37,25 +35,22 @@ DEST_ROOT=""
 WITH_EPEL=0
 FOREMAN_RELEASE_URL=""
 PUPPET_RELEASE_URL=""
-FOREMAN_IDS_DEFAULT="foreman,foreman-plugins,foreman-client"
-PUPPET_IDS_DEFAULT="puppet8,puppetlabs-products,puppetlabs-deps"
-FOREMAN_IDS="$FOREMAN_IDS_DEFAULT"
-PUPPET_IDS="$PUPPET_IDS_DEFAULT"
-# Minimal set (safe!) — add foreman-proxy later if you need Smart Proxy on same host
-PKGS=("foreman-installer" "puppet-agent" "foreman-cli")
+FOREMAN_IDS="foreman,foreman-plugins,foreman-client"
+PUPPET_IDS="puppet8,puppetlabs-products,puppetlabs-deps"
+PKGS=("foreman-installer" "puppet-agent" "foreman-cli")   # safe minimal set (add proxy via flag)
 
 need_val() { local f="$1"; local v="${2:-}"; [[ -n "$v" && ! "$v" =~ ^-- ]] || { echo "ERROR: $f requires a value." >&2; exit 2; }; }
 print_usage() {
   cat >&2 <<'USAGE'
-Usage: make-foreman-hybrid-bundle.sh <dest_dir> [options]
+Usage: min-airgap-package.sh <dest_dir> [options]
 
 Options:
   --with-epel
   --foreman-release-url URL
   --puppet-release-url  URL
-  --foreman-ids         "id1,id2"   (default: foreman,foreman-plugins,foreman-client)
-  --puppet-ids          "id1,id2"   (default: puppet8,puppetlabs-products,puppetlabs-deps)
-  --add-foreman-proxy              (include foreman-proxy in minimal deps; may pull ruby-libvirt)
+  --foreman-ids "id1,id2"   (default: foreman,foreman-plugins,foreman-client)
+  --puppet-ids  "id1,id2"   (default: puppet8,puppetlabs-products,puppetlabs-deps)
+  --add-foreman-proxy       (include foreman-proxy in minimal deps; may pull ruby-libvirt)
   --help | -h
 USAGE
 }
@@ -143,7 +138,6 @@ maybe_enable_epel() {
 }
 
 install_release_rpms() {
-  # Foreman & Puppet release RPMs (optional but recommended)
   if [[ -n "$FOREMAN_RELEASE_URL" ]]; then
     log "Installing Foreman release: $FOREMAN_RELEASE_URL"
     dnf -y install "$FOREMAN_RELEASE_URL" || die "Foreman release install failed"
@@ -158,10 +152,9 @@ install_release_rpms() {
   fi
 }
 
-# sanity: ensure the .repo files match current EL version (avoid EL9/EL10 mix-ups)
+# Ensure repo files point to the same EL as the OS (avoid EL9/EL10 mix-ups)
 validate_repo_el() {
-  local bad=0
-  local expect="el${ELVER}"
+  local bad=0 expect="el${ELVER}"
   for f in /etc/yum.repos.d/*.repo; do
     [[ -f "$f" ]] || continue
     if grep -Eo '/el(9|10)/' "$f" | grep -vq "$expect" ; then
@@ -195,7 +188,6 @@ download_minimal() {
   mkdir -p "$outdir"
   log "MINIMAL download (with deps) into $outdir"
   log "Packages: $*"
-  # --resolve pulls dependencies; keep it simple/robust
   "${DOWNLOAD[@]}" --resolve $DL_DEST_OPT "$outdir" "$@" || die "dnf download failed"
   log "Generating metadata for minimal repo..."
   createrepo_c --update "$outdir"
