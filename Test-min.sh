@@ -6,13 +6,13 @@ set -euo pipefail
 # - FULL mirror: Foreman & Puppet repos
 # - MINIMAL bundle: only deps needed from BaseOS/AppStream/CRB/EPEL
 #
-# Usage (AL10 example):
+# AL10 example:
 #   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
 #     --with-epel \
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
 #     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm"
 #
-# Usage (AL9 example):
+# AL9 example:
 #   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
 #     --with-epel \
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el9/x86_64/foreman-release.rpm" \
@@ -25,19 +25,18 @@ set -euo pipefail
 #     minimal/   (ONLY rpms for foreman-installer + puppet-agent [+ optional foreman-proxy])
 #     README-offline.txt
 #     sample-offline.repo
-#     <dest>-YYYYMMDD-HHMMSS.tar
+#   <dest>-YYYYMMDD-HHMMSS.tar
 #=========================================================
 
-#-----------------------------
-# CLI
-#-----------------------------
+# ---------------- CLI ----------------
 DEST_ROOT=""
 WITH_EPEL=0
 FOREMAN_RELEASE_URL=""
 PUPPET_RELEASE_URL=""
 FOREMAN_IDS="foreman,foreman-plugins,foreman-client"
 PUPPET_IDS="puppet8,puppetlabs-products,puppetlabs-deps"
-PKGS=("foreman-installer" "puppet-agent" "foreman-cli")   # safe minimal set (add proxy via flag)
+PKGS=("foreman-installer" "puppet-agent" "foreman-cli")   # safe minimal set
+IGNORE_REPO_EL_MISMATCH=0
 
 need_val() { local f="$1"; local v="${2:-}"; [[ -n "$v" && ! "$v" =~ ^-- ]] || { echo "ERROR: $f requires a value." >&2; exit 2; }; }
 print_usage() {
@@ -51,6 +50,7 @@ Options:
   --foreman-ids "id1,id2"   (default: foreman,foreman-plugins,foreman-client)
   --puppet-ids  "id1,id2"   (default: puppet8,puppetlabs-products,puppetlabs-deps)
   --add-foreman-proxy       (include foreman-proxy in minimal deps; may pull ruby-libvirt)
+  --ignore-repo-el-mismatch (skip EL version validation on Foreman/Puppet repo files)
   --help | -h
 USAGE
 }
@@ -68,14 +68,13 @@ while [[ $# -gt 0 ]]; do
     --foreman-ids)         need_val "$1" "${2:-}"; FOREMAN_IDS="$2";         shift 2 ;;
     --puppet-ids)          need_val "$1" "${2:-}"; PUPPET_IDS="$2";          shift 2 ;;
     --add-foreman-proxy)   PKGS+=("foreman-proxy"); shift ;;
+    --ignore-repo-el-mismatch) IGNORE_REPO_EL_MISMATCH=1; shift ;;
     --help|-h) print_usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; print_usage; exit 2 ;;
   esac
 done
 
-#-----------------------------
-# Helpers
-#-----------------------------
+# ---------------- Helpers ----------------
 log() { printf "\n==> %s\n" "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 require_root() { [[ $EUID -eq 0 ]] || die "Please run as root (sudo)."; }
@@ -101,7 +100,7 @@ install_tools() {
 }
 
 select_cmds() {
-  # reposync (DNF5 uses --destdir; DNF4 plugin/standalone uses --download-path)
+  # reposync
   if command -v dnf5 >/dev/null 2>&1 && dnf5 --help 2>&1 | grep -qi reposync; then
     REPOSYNC=(dnf5 reposync); DEST_OPT="--destdir"
   elif command -v reposync >/dev/null 2>&1; then
@@ -152,18 +151,18 @@ install_release_rpms() {
   fi
 }
 
-# Ensure repo files point to the same EL as the OS (avoid EL9/EL10 mix-ups)
+# Validate ONLY Foreman/Puppet repo files match our EL (avoid false positives from other repos)
 validate_repo_el() {
   local bad=0 expect="el${ELVER}"
-  for f in /etc/yum.repos.d/*.repo; do
+  for f in /etc/yum.repos.d/foreman*.repo /etc/yum.repos.d/puppet*.repo; do
     [[ -f "$f" ]] || continue
-    if grep -Eo '/el(9|10)/' "$f" | grep -vq "$expect" ; then
-      echo "WARNING: Repo file mismatched to OS: $f" >&2
+    if grep -Eo '/el(9|10)/' "$f" | grep -vq "$expect"; then
+      echo "WARNING: Foreman/Puppet repo mismatched to OS: $f" >&2
       bad=1
     fi
   done
   if (( bad )); then
-    echo "One or more repo files look mismatched to AlmaLinux ${ELVER}. Fix them before continuing." >&2
+    echo "One or more Foreman/Puppet repo files are mismatched to AlmaLinux ${ELVER}. Fix them or use --ignore-repo-el-mismatch." >&2
     exit 2
   fi
 }
@@ -189,6 +188,15 @@ download_minimal() {
   log "MINIMAL download (with deps) into $outdir"
   log "Packages: $*"
   "${DOWNLOAD[@]}" --resolve $DL_DEST_OPT "$outdir" "$@" || die "dnf download failed"
+
+  # Hard guard: ensure we actually downloaded RPMs
+  shopt -s nullglob
+  local rpms=( "$outdir"/*.rpm )
+  shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    die "No packages were downloaded into $outdir. Check that EL${ELVER} BaseOS/AppStream/CRB (and EPEL if used) + Foreman/Puppet repos are enabled and aligned."
+  fi
+
   log "Generating metadata for minimal repo..."
   createrepo_c --update "$outdir"
 }
@@ -256,9 +264,7 @@ tar_bundle() {
   tar -C "$(dirname "$root")" -cf "$tarfile" "$(basename "$root")"
 }
 
-#-----------------------------
-# MAIN
-#-----------------------------
+# ---------------- MAIN ----------------
 require_root
 detect_el
 install_tools
@@ -266,7 +272,11 @@ select_cmds
 enable_base_repos
 maybe_enable_epel
 install_release_rpms
-validate_repo_el
+if [[ $IGNORE_REPO_EL_MISMATCH -eq 0 ]]; then
+  validate_repo_el
+else
+  log "Skipping EL repo mismatch validation (--ignore-repo-el-mismatch set)"
+fi
 
 DEST_ROOT="$(readlink -f "$DEST_ROOT")"; mkdir -p "$DEST_ROOT"
 FOREMAN_DIR="$DEST_ROOT/foreman"
