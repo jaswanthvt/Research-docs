@@ -2,7 +2,7 @@
 set -euo pipefail
 
 #=========================================================
-# Offline repo mirror builder for AlmaLinux 9 (air-gapped Foreman)
+# Offline repo mirror builder for AlmaLinux 10 (air-gapped Foreman)
 #=========================================================
 # What it does:
 #  - Mirrors BaseOS, AppStream, CRB (required)
@@ -12,17 +12,13 @@ set -euo pipefail
 #  - Creates repodata and a README with offline install steps
 #
 # Usage examples:
-#   ./make-foreman-offline-mirror-el9.sh /srv/foreman-mirror
-#   ./make-foreman-offline-mirror-el9.sh /mnt/disk/foreman-mirror --with-epel
-#   ./make-foreman-offline-mirror-el9.sh /srv/foreman-mirror \
+#   ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror
+#   ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror --with-epel
+#   ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror \
 #       --with-epel \
-#       --foreman-release-url "https://yum.theforeman.org/releases/3.x/el9/x86_64/foreman-release.rpm" \
-#       --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-9.noarch.rpm" \
+#       --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
+#       --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm" \
 #       --extra-repos "foreman-plugins,puppetlabs-products"
-#
-# Notes:
-# - If you’re not sure about the Foreman/Puppet URLs yet, skip those flags now and re-run later.
-# - This script is hardened for AL9 (DNF4) but auto-detects reposync via dnf/dnf5 if needed.
 #=========================================================
 
 #-----------------------------
@@ -45,21 +41,22 @@ need_val() {
 
 print_usage() {
   cat >&2 <<'USAGE'
-Usage: make-foreman-offline-mirror-el9.sh <destination_dir> [options]
+Usage: make-foreman-offline-mirror-el10.sh <destination_dir> [options]
 
 Options:
   --with-epel
   --foreman-release-url URL
   --puppet-release-url  URL
   --extra-repos         'repoid1,repoid2'
+  --help, -h
 
 Examples:
-  ./make-foreman-offline-mirror-el9.sh /srv/foreman-mirror
-  ./make-foreman-offline-mirror-el9.sh /srv/foreman-mirror --with-epel
-  ./make-foreman-offline-mirror-el9.sh /srv/foreman-mirror \
+  ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror
+  ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror --with-epel
+  ./make-foreman-offline-mirror-el10.sh /srv/foreman-mirror \
     --with-epel \
-    --foreman-release-url "https://yum.theforeman.org/releases/3.x/el9/x86_64/foreman-release.rpm" \
-    --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-9.noarch.rpm" \
+    --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
+    --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm" \
     --extra-repos "foreman-plugins,puppetlabs-products"
 USAGE
 }
@@ -75,19 +72,12 @@ DEST_ROOT="$1"; shift
 # Parse remaining flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --with-epel)
-      WITH_EPEL=1; shift ;;
-    --foreman-release-url)
-      need_val "$1" "${2:-}"; FOREMAN_RELEASE_URL="$2"; shift 2 ;;
-    --puppet-release-url)
-      need_val "$1" "${2:-}"; PUPPET_RELEASE_URL="$2";  shift 2 ;;
-    --extra-repos)
-      need_val "$1" "${2:-}"; EXTRA_REPOS="$2";         shift 2 ;;
-    --help|-h)
-      print_usage; exit 0 ;;
-    *)
-      echo "Unknown option: $1" >&2
-      print_usage; exit 2 ;;
+    --with-epel) WITH_EPEL=1; shift ;;
+    --foreman-release-url) need_val "$1" "${2:-}"; FOREMAN_RELEASE_URL="$2"; shift 2 ;;
+    --puppet-release-url)  need_val "$1" "${2:-}"; PUPPET_RELEASE_URL="$2";  shift 2 ;;
+    --extra-repos)         need_val "$1" "${2:-}"; EXTRA_REPOS="$2";         shift 2 ;;
+    --help|-h) print_usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; print_usage; exit 2 ;;
   esac
 done
 
@@ -101,11 +91,11 @@ require_root() {
   [[ $EUID -eq 0 ]] || die "Please run as root (sudo)."
 }
 
-check_alma9() {
+check_alma10() {
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
-    if [[ "${ID:-}" != "almalinux" || "${VERSION_ID:-}" != 9* ]]; then
-      die "This script is designed for AlmaLinux 9. Detected: ID=${ID:-?}, VERSION_ID=${VERSION_ID:-?}"
+    if [[ "${ID:-}" != "almalinux" || "${VERSION_ID:-}" != 10* ]]; then
+      die "This script is designed for AlmaLinux 10. Detected: ID=${ID:-?}, VERSION_ID=${VERSION_ID:-?}"
     fi
   else
     die "/etc/os-release not found; cannot verify OS."
@@ -113,14 +103,17 @@ check_alma9() {
 }
 
 install_tools() {
-  log "Installing required tools (dnf-plugins-core, dnf5-plugins (if present), createrepo_c, tar)..."
-  # dnf5-plugins may not exist on AL9; ignore failure for that package.
-  dnf -y install dnf-plugins-core createrepo_c tar || die "Failed to install core prerequisites"
-  dnf -y install dnf5-plugins || true
+  log "Installing required tools (dnf5-plugins, dnf-plugins-core (fallback), createrepo_c, tar)..."
+  # AL10 uses dnf5; include fallback for safety.
+  dnf -y install dnf5-plugins createrepo_c tar || true
+  dnf -y install dnf-plugins-core createrepo_c tar || true
+  # Ensure createrepo_c & tar are present
+  command -v createrepo_c >/dev/null || die "createrepo_c not found after install"
+  command -v tar >/dev/null || die "tar not found after install"
 }
 
 select_reposync() {
-  # Prefer standalone reposync if present; otherwise fall back to dnf5/dnf.
+  # On AL10, reposync is typically `dnf5 reposync` from dnf5-plugins.
   if command -v reposync >/dev/null 2>&1; then
     REPOSYNC=(reposync)
   elif command -v dnf5 >/dev/null 2>&1 && dnf5 --help 2>&1 | grep -qi reposync; then
@@ -128,7 +121,7 @@ select_reposync() {
   elif command -v dnf >/dev/null 2>&1 && dnf --help 2>&1 | grep -qi reposync; then
     REPOSYNC=(dnf reposync)
   else
-    die "No reposync found. Install dnf-plugins-core (DNF4) or dnf5-plugins (DNF5)."
+    die "No reposync found. Install dnf5-plugins (DNF5) or dnf-plugins-core (fallback)."
   fi
   log "Using reposync command: ${REPOSYNC[*]}"
 }
@@ -165,7 +158,9 @@ install_release_rpms() {
 # Return 0 if repo ID exists (enabled or disabled), else 1
 repo_exists() {
   local repoid="$1"
-  dnf repolist --all | awk '{print $1}' | grep -qE "^${repoid}(\.|$)"
+  # dnf5 and dnf output first column as the repo ID; accept both.
+  (dnf5 repolist --all 2>/dev/null || dnf repolist --all 2>/dev/null || true) \
+    | awk '{print $1}' | grep -qE "^${repoid}(\.|$)"
 }
 
 reposync_one() {
@@ -179,10 +174,10 @@ reposync_one() {
 
   log "Syncing '$repoid' -> $dest"
   mkdir -p "$dest"
-  # -m/--download-metadata; -p output path; -j parallel; EL9 usually has standalone reposync.
+  # -m/--download-metadata; -p output path; -j parallel
   "${REPOSYNC[@]}" -m --download-metadata -p "$dest" --repoid="$repoid" -j "$(nproc)" || die "reposync failed for $repoid"
 
-  # reposync creates a subdir named like the repoid inside $dest; detect it:
+  # reposync usually creates a subdir named like the repoid inside $dest; detect it:
   local subdir
   subdir="$(find "$dest" -maxdepth 1 -type d -name "$repoid*" | head -n1 || true)"
   if [[ -z "$subdir" ]]; then
@@ -197,10 +192,10 @@ reposync_one() {
 write_readme() {
   local out="$1/README-offline.txt"
   cat > "$out" <<'EOF'
-Offline Repos for AlmaLinux 9 (Foreman install)
+Offline Repos for AlmaLinux 10 (Foreman install)
 ===============================================
 
-This bundle contains DNF/YUM repositories mirrored from an online AlmaLinux 9 machine:
+This bundle contains DNF repositories mirrored from an online AlmaLinux 10 machine:
 - BaseOS
 - AppStream
 - CRB
@@ -209,7 +204,7 @@ This bundle contains DNF/YUM repositories mirrored from an online AlmaLinux 9 ma
 - (optional) Puppet
 - (optional) any extra repos you provided
 
-How to use on the air-gapped AlmaLinux 9 server
+How to use on the air-gapped AlmaLinux 10 server
 ------------------------------------------------
 1) Copy the entire directory (keeping structure) to the target, e.g.:
    /opt/localrepos
@@ -285,7 +280,7 @@ tar_bundle() {
 # Main
 #-----------------------------
 require_root
-check_alma9
+check_alma10
 install_tools
 select_reposync
 enable_base_repos
@@ -307,8 +302,7 @@ if [[ $WITH_EPEL -eq 1 ]]; then
 fi
 
 # Try to detect plausible Foreman/Puppet repo IDs that may have been added by release RPMs.
-# These vary; attempt common names and any user-provided extras.
-COMMON_FOREMAN_IDS=(foreman foreman-plugins foreman-client foreman-client-el9)
+COMMON_FOREMAN_IDS=(foreman foreman-plugins foreman-client)
 COMMON_PUPPET_IDS=(puppet puppet8 puppet7 puppetlabs-products puppetlabs-deps puppetlabs-pc1)
 
 for id in "${COMMON_FOREMAN_IDS[@]}"; do
@@ -325,7 +319,6 @@ if [[ -n "$EXTRA_REPOS" ]]; then
     id_trim="$(echo "$id" | xargs)"
     [[ -z "$id_trim" ]] && continue
     if repo_exists "$id_trim"; then
-      # Use repo ID as subdir name if not already mapped
       MAP["$id_trim"]="${MAP[$id_trim]:-$id_trim}"
     else
       log "Warning: extra repo '$id_trim' not found; skipping."
@@ -405,4 +398,4 @@ log "Mirror directory: $DEST_ROOT"
 log "Tarball ready:    $OUT_TAR"
 echo
 echo "Next steps (connected host): copy the tarball to your removable disk."
-echo "On the air-gapped host (AL9): extract to /opt/localrepos, drop sample-offline.repo into /etc/yum.repos.d/, then 'dnf makecache' and install 'foreman-installer'."
+echo "On the air-gapped host (AL10): extract to /opt/localrepos, drop sample-offline.repo into /etc/yum.repos.d/, then 'dnf makecache' and install 'foreman-installer'."
