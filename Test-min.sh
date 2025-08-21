@@ -2,21 +2,27 @@
 set -euo pipefail
 
 #=========================================================
-# Hybrid Foreman/Puppet offline bundle for AlmaLinux 9/10
-# - FULL mirror: Foreman & Puppet repos
+# Hybrid Foreman/Puppet offline bundle for AlmaLinux 9 (server) and 10 (client-only)
+# - FULL mirror: Foreman & Puppet repos (EL9 server; EL10 has Foreman *client* only)
 # - MINIMAL bundle: only deps needed from BaseOS/AppStream/CRB/EPEL
 #
-# AL10 example:
+# RECOMMENDED (AL9 server):
 #   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
-#     --with-epel \
-#     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el10/x86_64/foreman-release.rpm" \
-#     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm"
+#     --with-epel
+#   # (Defaults will auto-pick EL9 Foreman & Puppet release RPMs)
 #
-# AL9 example:
+# Explicit EL9 example:
 #   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
 #     --with-epel \
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el9/x86_64/foreman-release.rpm" \
 #     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-9.noarch.rpm"
+#
+# EL10 (client-only) example:
+#   sudo ./min-airgap-package.sh /srv/foreman-hybrid \
+#     --with-epel \
+#     --foreman-release-url "https://yum.theforeman.org/client/latest/el10/x86_64/foreman-client-release.rpm" \
+#     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-10.noarch.rpm" \
+#     --foreman-ids "foreman-client"
 #
 # Output:
 #   <dest>/
@@ -91,9 +97,28 @@ detect_el() {
   log "Detected AlmaLinux ${ELVER}"
 }
 
+# Default URLs per EL; block EL10 server release misuse
+set_defaults_for_el() {
+  if [[ "$ELVER" -eq 9 ]]; then
+    if [[ -z "$FOREMAN_RELEASE_URL" ]]; then
+      FOREMAN_RELEASE_URL="https://yum.theforeman.org/releases/3.15/el9/x86_64/foreman-release.rpm"
+      log "Defaulting Foreman release URL for EL9 -> $FOREMAN_RELEASE_URL"
+    fi
+    if [[ -z "$PUPPET_RELEASE_URL" ]]; then
+      PUPPET_RELEASE_URL="https://yum.puppet.com/puppet8-release-el-9.noarch.rpm"
+      log "Defaulting Puppet release URL for EL9  -> $PUPPET_RELEASE_URL"
+    fi
+  elif [[ "$ELVER" -eq 10 ]]; then
+    # Foreman server repos aren’t published for EL10; allow client-only if the user provides client URL
+    if [[ -n "$FOREMAN_RELEASE_URL" && "$FOREMAN_RELEASE_URL" =~ /releases/ ]]; then
+      die "Foreman *server* releases are not available for EL10. Use the foreman-client release or run this on AlmaLinux 9."
+    fi
+  fi
+}
+
 install_tools() {
   log "Installing tools (dnf5-plugins/dnf-plugins-core, createrepo_c, tar, xz)..."
-  dnf -y install dnf5-plugins createrepo_c tar xz || true   # AL10 / DNF5
+  dnf -y install dnf5-plugins createrepo_c tar xz || true   # AL10 / DNF5 (noop on AL9)
   dnf -y install dnf-plugins-core createrepo_c tar xz || true
   command -v createrepo_c >/dev/null || die "createrepo_c missing"
   command -v tar >/dev/null || die "tar missing"
@@ -267,6 +292,7 @@ tar_bundle() {
 # ---------------- MAIN ----------------
 require_root
 detect_el
+set_defaults_for_el
 install_tools
 select_cmds
 enable_base_repos
