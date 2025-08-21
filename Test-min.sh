@@ -4,7 +4,7 @@ set -euo pipefail
 #=========================================================
 # Hybrid Foreman/Puppet offline bundle for AlmaLinux 9/10
 # - FULL mirror: Foreman & Puppet repos
-# - MINIMAL bundle: only the deps needed from BaseOS/AppStream/CRB/EPEL
+# - MINIMAL bundle: only deps needed from BaseOS/AppStream/CRB/EPEL
 #=========================================================
 # Usage:
 #   ./make-foreman-hybrid-bundle.sh <dest_dir> [options]
@@ -21,26 +21,30 @@ set -euo pipefail
 #     --foreman-release-url "https://yum.theforeman.org/releases/3.15/el9/x86_64/foreman-release.rpm" \
 #     --puppet-release-url  "https://yum.puppet.com/puppet8-release-el-9.noarch.rpm"
 #
-# Notes:
-# - Foreman/Puppet URLs optional; you can re-run later to add them.
-# - Output layout:
-#     dest/
-#       foreman/   (FULL mirror)
-#       puppet/    (FULL mirror)
-#       minimal/   (ONLY the rpms needed from base/appstream/crb/epel)
-#       README-offline.txt
-#       sample-offline.repo
+# Output layout:
+#   dest/
+#     foreman/   (FULL mirror)
+#     puppet/    (FULL mirror)
+#     minimal/   (ONLY rpms for foreman-installer + puppet-agent and deps)
+#     README-offline.txt
+#     sample-offline.repo
 #=========================================================
 
+#-----------------------------
+# CLI
+#-----------------------------
 DEST_ROOT=""
 WITH_EPEL=0
 FOREMAN_RELEASE_URL=""
 PUPPET_RELEASE_URL=""
-EXTRA_FOREMAN_IDS="foreman,foreman-plugins,foreman-client"
-EXTRA_PUPPET_IDS="puppet,puppet8,puppetlabs-products,puppetlabs-deps,puppetlabs-pc1"
+FOREMAN_IDS_DEFAULT="foreman,foreman-plugins,foreman-client"
+PUPPET_IDS_DEFAULT="puppet8,puppetlabs-products,puppetlabs-deps"
+FOREMAN_IDS="$FOREMAN_IDS_DEFAULT"
+PUPPET_IDS="$PUPPET_IDS_DEFAULT"
+# Minimal set (safe!) — add foreman-proxy later if you need Smart Proxy on same host
+PKGS=("foreman-installer" "puppet-agent" "foreman-cli")
 
 need_val() { local f="$1"; local v="${2:-}"; [[ -n "$v" && ! "$v" =~ ^-- ]] || { echo "ERROR: $f requires a value." >&2; exit 2; }; }
-
 print_usage() {
   cat >&2 <<'USAGE'
 Usage: make-foreman-hybrid-bundle.sh <dest_dir> [options]
@@ -49,13 +53,13 @@ Options:
   --with-epel
   --foreman-release-url URL
   --puppet-release-url  URL
-  --extra-foreman-ids   "id1,id2"   (default: foreman,foreman-plugins,foreman-client)
-  --extra-puppet-ids    "id1,id2"   (default: puppet,puppet8,puppetlabs-products,puppetlabs-deps,puppetlabs-pc1)
+  --foreman-ids         "id1,id2"   (default: foreman,foreman-plugins,foreman-client)
+  --puppet-ids          "id1,id2"   (default: puppet8,puppetlabs-products,puppetlabs-deps)
+  --add-foreman-proxy              (include foreman-proxy in minimal deps; may pull ruby-libvirt)
   --help | -h
 USAGE
 }
 
-# --- Parse CLI ---
 if [[ $# -lt 1 || "$1" =~ ^-- ]]; then
   echo "ERROR: destination directory is required as the first argument." >&2
   print_usage; exit 2
@@ -66,39 +70,43 @@ while [[ $# -gt 0 ]]; do
     --with-epel) WITH_EPEL=1; shift ;;
     --foreman-release-url) need_val "$1" "${2:-}"; FOREMAN_RELEASE_URL="$2"; shift 2 ;;
     --puppet-release-url)  need_val "$1" "${2:-}"; PUPPET_RELEASE_URL="$2";  shift 2 ;;
-    --extra-foreman-ids)   need_val "$1" "${2:-}"; EXTRA_FOREMAN_IDS="$2";   shift 2 ;;
-    --extra-puppet-ids)    need_val "$1" "${2:-}"; EXTRA_PUPPET_IDS="$2";    shift 2 ;;
+    --foreman-ids)         need_val "$1" "${2:-}"; FOREMAN_IDS="$2";         shift 2 ;;
+    --puppet-ids)          need_val "$1" "${2:-}"; PUPPET_IDS="$2";          shift 2 ;;
+    --add-foreman-proxy)   PKGS+=("foreman-proxy"); shift ;;
     --help|-h) print_usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; print_usage; exit 2 ;;
   esac
 done
 
+#-----------------------------
+# Helpers
+#-----------------------------
 log() { printf "\n==> %s\n" "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
-
 require_root() { [[ $EUID -eq 0 ]] || die "Please run as root (sudo)."; }
 
 detect_el() {
-  . /etc/os-release || die "cannot read /etc/os-release"
+  [[ -r /etc/os-release ]] || die "/etc/os-release missing"
+  . /etc/os-release
   [[ "${ID:-}" == "almalinux" ]] || die "This script targets AlmaLinux only."
-  if [[ "${VERSION_ID:-}" == 9* ]]; then ELVER=9
-  elif [[ "${VERSION_ID:-}" == 10* ]]; then ELVER=10
-  else die "Unsupported AlmaLinux VERSION_ID=${VERSION_ID:-?} (need 9 or 10)"; fi
+  case "${VERSION_ID:-}" in
+    9*) ELVER=9 ;;
+    10*) ELVER=10 ;;
+    *) die "Unsupported AlmaLinux VERSION_ID=${VERSION_ID:-?} (need 9 or 10)" ;;
+  esac
   log "Detected AlmaLinux ${ELVER}"
 }
 
 install_tools() {
   log "Installing tools (dnf5-plugins/dnf-plugins-core, createrepo_c, tar, xz)..."
-  # Try both DNF5 and DNF4 plugin sets; ignore failures where not present
-  dnf -y install dnf5-plugins createrepo_c tar xz || true
+  dnf -y install dnf5-plugins createrepo_c tar xz || true   # AL10 / DNF5
   dnf -y install dnf-plugins-core createrepo_c tar xz || true
-
   command -v createrepo_c >/dev/null || die "createrepo_c missing"
   command -v tar >/dev/null || die "tar missing"
 }
 
 select_cmds() {
-  # reposync
+  # reposync (DNF5 uses --destdir; DNF4 plugin/standalone uses --download-path)
   if command -v dnf5 >/dev/null 2>&1 && dnf5 --help 2>&1 | grep -qi reposync; then
     REPOSYNC=(dnf5 reposync); DEST_OPT="--destdir"
   elif command -v reposync >/dev/null 2>&1; then
@@ -135,13 +143,42 @@ maybe_enable_epel() {
 }
 
 install_release_rpms() {
-  [[ -n "$FOREMAN_RELEASE_URL" ]] && { log "Installing Foreman release: $FOREMAN_RELEASE_URL"; dnf -y install "$FOREMAN_RELEASE_URL" || die "Foreman release install failed"; } || log "Skipping Foreman release."
-  [[ -n "$PUPPET_RELEASE_URL"  ]] && { log "Installing Puppet release:  $PUPPET_RELEASE_URL";  dnf -y install "$PUPPET_RELEASE_URL"  || die "Puppet release install failed";  } || log "Skipping Puppet release."
+  # Foreman & Puppet release RPMs (optional but recommended)
+  if [[ -n "$FOREMAN_RELEASE_URL" ]]; then
+    log "Installing Foreman release: $FOREMAN_RELEASE_URL"
+    dnf -y install "$FOREMAN_RELEASE_URL" || die "Foreman release install failed"
+  else
+    log "Skipping Foreman release (no URL)."
+  fi
+  if [[ -n "$PUPPET_RELEASE_URL" ]]; then
+    log "Installing Puppet release:  $PUPPET_RELEASE_URL"
+    dnf -y install "$PUPPET_RELEASE_URL"  || die "Puppet release install failed"
+  else
+    log "Skipping Puppet release (no URL)."
+  fi
+}
+
+# sanity: ensure the .repo files match current EL version (avoid EL9/EL10 mix-ups)
+validate_repo_el() {
+  local bad=0
+  local expect="el${ELVER}"
+  for f in /etc/yum.repos.d/*.repo; do
+    [[ -f "$f" ]] || continue
+    if grep -Eo '/el(9|10)/' "$f" | grep -vq "$expect" ; then
+      echo "WARNING: Repo file mismatched to OS: $f" >&2
+      bad=1
+    fi
+  done
+  if (( bad )); then
+    echo "One or more repo files look mismatched to AlmaLinux ${ELVER}. Fix them before continuing." >&2
+    exit 2
+  fi
 }
 
 repo_exists() {
   local id="$1"
-  (dnf5 repolist --all 2>/dev/null || dnf repolist --all 2>/dev/null || true) | awk '{print $1}' | grep -qE "^${id}(\.|$)"
+  (dnf5 repolist --all 2>/dev/null || dnf repolist --all 2>/dev/null || true) \
+    | awk '{print $1}' | grep -qE "^${id}(\.|$)"
 }
 
 reposync_one() {
@@ -150,16 +187,15 @@ reposync_one() {
   log "FULL mirror: $repoid -> $dest"
   mkdir -p "$dest"
   "${REPOSYNC[@]}" --download-metadata "$DEST_OPT" "$dest" --repoid="$repoid" || die "reposync failed for $repoid"
-  # Create/refresh metadata (reposync usually handles inside subdir; do top too)
   createrepo_c --update "$dest" || true
 }
 
 download_minimal() {
   local outdir="$1"; shift
   mkdir -p "$outdir"
-  log "MINIMAL download of packages (with deps) into $outdir:"
+  log "MINIMAL download (with deps) into $outdir"
   log "Packages: $*"
-  # --resolve pulls all dependencies, --alldeps is not needed here
+  # --resolve pulls dependencies; keep it simple/robust
   "${DOWNLOAD[@]}" --resolve $DL_DEST_OPT "$outdir" "$@" || die "dnf download failed"
   log "Generating metadata for minimal repo..."
   createrepo_c --update "$outdir"
@@ -179,7 +215,7 @@ Contents:
 Use on AIR-GAPPED host:
 -----------------------
 1) Copy this directory to the target, e.g. /opt/localrepos
-2) Create /etc/yum.repos.d/local-offline.repo similar to sample-offline.repo here.
+2) Create /etc/yum.repos.d/local-offline.repo (see sample-offline.repo here).
 3) Run:
      dnf clean all
      dnf makecache
@@ -189,15 +225,16 @@ Use on AIR-GAPPED host:
      foreman-installer    # or: foreman-installer -i
 
 Notes:
-- The 'minimal' repo contains only the currently resolved deps. If install fails due to a missing dep, re-run the builder adding that package or include EPEL/base repos fully.
-- For updates or plugins later, you may need to rebuild/refresh.
+- 'minimal/' contains deps resolved at build time. If install fails due to a missing dep,
+  rebuild and include that package, or switch to full repo mirroring for the base repos.
+- If you later add plugins or updates, you may need to rebuild the bundle.
 EOF
   log "Wrote $out"
 }
 
 write_repo_template() {
   cat > "$1/sample-offline.repo" <<'REPO'
-# Minimal deps (BaseOS/AppStream/CRB/EPEL subset needed by Foreman+Puppet)
+# Minimal deps (BaseOS/AppStream/CRB/EPEL subset for Foreman+Puppet)
 [local-minimal]
 name=Local Minimal Core Deps
 baseurl=file:///opt/localrepos/minimal
@@ -227,7 +264,9 @@ tar_bundle() {
   tar -C "$(dirname "$root")" -cf "$tarfile" "$(basename "$root")"
 }
 
-# ----------------- MAIN -----------------
+#-----------------------------
+# MAIN
+#-----------------------------
 require_root
 detect_el
 install_tools
@@ -235,6 +274,7 @@ select_cmds
 enable_base_repos
 maybe_enable_epel
 install_release_rpms
+validate_repo_el
 
 DEST_ROOT="$(readlink -f "$DEST_ROOT")"; mkdir -p "$DEST_ROOT"
 FOREMAN_DIR="$DEST_ROOT/foreman"
@@ -242,15 +282,12 @@ PUPPET_DIR="$DEST_ROOT/puppet"
 MINIMAL_DIR="$DEST_ROOT/minimal"
 
 # 1) FULL mirror Foreman/Puppet repos
-IFS=',' read -r -a F_IDS <<< "$EXTRA_FOREMAN_IDS"
-IFS=',' read -r -a P_IDS <<< "$EXTRA_PUPPET_IDS"
+IFS=',' read -r -a F_IDS <<< "$FOREMAN_IDS"
+IFS=',' read -r -a P_IDS <<< "$PUPPET_IDS"
 for id in "${F_IDS[@]}"; do id="$(echo "$id" | xargs)"; [[ -n "$id" ]] && reposync_one "$id" "$FOREMAN_DIR"; done
 for id in "${P_IDS[@]}"; do id="$(echo "$id" | xargs)"; [[ -n "$id" ]] && reposync_one "$id" "$PUPPET_DIR"; done
 
-# 2) MINIMAL: only what foreman-installer + puppet-agent need
-PKGS=(foreman-installer puppet-agent)
-# (Optional: add a few commonly-needed helpers; harmless if already deps)
-PKGS+=(foreman-cli foreman-proxy)
+# 2) MINIMAL: only what foreman-installer + puppet-agent (and optional foreman-proxy) need
 download_minimal "$MINIMAL_DIR" "${PKGS[@]}"
 
 # 3) Docs & bundle
