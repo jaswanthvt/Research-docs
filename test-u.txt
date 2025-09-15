@@ -1,44 +1,57 @@
-I'll run a few safe checks to see what's already built and what's running in your cluster. Then I'll report findings and suggest next actions.
+### End-to-end process (repeat, concise)
 
-[5 tools called]
+- 1) Online machine: prepare IPA files
+  - If you already have them:
+    ```bash
+    mkdir -p /Users/My_Folder/Codes/metal-kube/zarf/artifacts
+    cp ~/ipa/ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel
+    cp ~/ipa/ironic-python-agent.initramfs /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
+    chmod 0644 /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
+    ```
+  - Or download fresh:
+    ```bash
+    mkdir -p ~/ipa && cd ~/ipa
+    curl -L -o ironic-python-agent.kernel https://images.rdoproject.org/current-tripleo/ironic-python-agent.kernel
+    curl -L -o ironic-python-agent.initramfs https://images.rdoproject.org/current-tripleo/ironic-python-agent.initramfs
+    cp ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel
+    cp ironic-python-agent.initramfs /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
+    chmod 0644 /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
+    ```
 
-I checked for built packages and cluster access. No Zarf package archives were found at your path, and kubectl here isn’t connected to your cluster. I’ll give you the exact commands to run on each machine.
+- 2) Online machine: build Zarf packages
+  ```bash
+  /Users/My_Folder/Codes/metal-kube/zarf/scripts/online_build.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+  ls -1 /Users/My_Folder/Codes/metal-kube/zarf/zarf-packages/zarf-package-metal3-*.tar.zst
+  ```
+  - Package YAMLs are written to `zarf/zarf-packages/`:
+    - `zarf-bmo.yaml`
+    - `zarf-ironic.yaml`
+  - Archives to transfer:
+    - `zarf-package-metal3-bmo-*.tar.zst`
+    - `zarf-package-metal3-ironic-*.tar.zst`
 
-### On the online machine
-1) Put IPA artifacts:
-```bash
-install -D -m 0644 ~/ipa/ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel
-install -D -m 0644 ~/ipa/ironic-python-agent.initramfs /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
-```
+- 3) Move packages to air‑gapped control node
+  - Copy both `.tar.zst` files from `zarf/zarf-packages/` to the node.
 
-2) Build Zarf packages:
-```bash
-/Users/My_Folder/Codes/metal-kube/zarf/scripts/online_build.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
-ls -1 /Users/My_Folder/Codes/metal-kube/zarf/zarf-packages/zarf-package-metal3-*.tar.zst
-```
+- 4) Air‑gapped control node: set target node and deploy
+  ```bash
+  # choose a node to host IPA files
+  kubectl get nodes -o name
 
-3) Transfer the two .tar.zst files from `/Users/My_Folder/Codes/metal-kube/zarf/zarf-packages/` to your air‑gapped control node.
+  # set the node name in config
+  sed -i.bak 's/^export IPA_NODE_NAME=.*/export IPA_NODE_NAME="<YOUR_NODE_NAME>"/' /Users/My_Folder/Codes/metal-kube/zarf/config.sh
 
-### On the air‑gapped k3s control node
-1) Choose the node that will host the IPA files:
-```bash
-kubectl get nodes -o name
-```
+  # deploy (also initializes Zarf registry if needed)
+  /Users/My_Folder/Codes/metal-kube/zarf/scripts/airgap_deploy.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+  ```
 
-2) Set `IPA_NODE_NAME` in config and deploy:
-```bash
-sed -i.bak 's/^export IPA_NODE_NAME=.*/export IPA_NODE_NAME="<YOUR_NODE_NAME>"/' /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+- 5) Verify
+  ```bash
+  kubectl -n metal3 get deploy baremetal-operator-controller-manager
+  kubectl -n metal3 get pods
+  kubectl -n metal3 get svc ipa-server
+  kubectl get crds | grep baremetalhost
+  kubectl -n metal3 get deploy ironic-ipa-downloader -o jsonpath='{.spec.template.spec.containers[0].env}' | grep IPA_BASEURI
+  ```
 
-/Users/My_Folder/Codes/metal-kube/zarf/scripts/airgap_deploy.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
-```
-
-3) Verify:
-```bash
-kubectl -n metal3 get deploy baremetal-operator-controller-manager
-kubectl -n metal3 get pods
-kubectl -n metal3 get svc ipa-server
-kubectl get crds | grep baremetalhost
-kubectl -n metal3 get deploy ironic-ipa-downloader -o jsonpath='{.spec.template.spec.containers[0].env}' | grep IPA_BASEURI
-```
-
-If you want, tell me which machine you’re on right now (online vs air‑gapped), and I’ll run the appropriate checks there and fix anything that fails.
+Want me to run verification commands on your air‑gapped node once you’ve deployed?
