@@ -54,4 +54,47 @@
   kubectl -n metal3 get deploy ironic-ipa-downloader -o jsonpath='{.spec.template.spec.containers[0].env}' | grep IPA_BASEURI
   ```
 
-Want me to run verification commands on your air‑gapped node once you’ve deployed?
+I'll run a few safe checks to see what's already built and what's running in your cluster. Then I'll report findings and suggest next actions.
+
+[5 tools called]
+
+I checked for built packages and cluster access. No Zarf package archives were found at your path, and kubectl here isn’t connected to your cluster. I’ll give you the exact commands to run on each machine.
+
+### On the online machine
+1) Put IPA artifacts:
+```bash
+install -D -m 0644 ~/ipa/ironic-python-agent.kernel /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.kernel
+install -D -m 0644 ~/ipa/ironic-python-agent.initramfs /Users/My_Folder/Codes/metal-kube/zarf/artifacts/ironic-python-agent.initramfs
+```
+
+2) Build Zarf packages:
+```bash
+/Users/My_Folder/Codes/metal-kube/zarf/scripts/online_build.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+ls -1 /Users/My_Folder/Codes/metal-kube/zarf/zarf-packages/zarf-package-metal3-*.tar.zst
+```
+
+3) Transfer the two .tar.zst files from `/Users/My_Folder/Codes/metal-kube/zarf/zarf-packages/` to your air‑gapped control node.
+
+### On the air‑gapped k3s control node
+1) Choose the node that will host the IPA files:
+```bash
+kubectl get nodes -o name
+```
+
+2) Set `IPA_NODE_NAME` in config and deploy:
+```bash
+sed -i.bak 's/^export IPA_NODE_NAME=.*/export IPA_NODE_NAME="<YOUR_NODE_NAME>"/' /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+
+/Users/My_Folder/Codes/metal-kube/zarf/scripts/airgap_deploy.sh /Users/My_Folder/Codes/metal-kube/zarf/config.sh
+```
+
+3) Verify:
+```bash
+kubectl -n metal3 get deploy baremetal-operator-controller-manager
+kubectl -n metal3 get pods
+kubectl -n metal3 get svc ipa-server
+kubectl get crds | grep baremetalhost
+kubectl -n metal3 get deploy ironic-ipa-downloader -o jsonpath='{.spec.template.spec.containers[0].env}' | grep IPA_BASEURI
+```
+
+If you want, tell me which machine you’re on right now (online vs air‑gapped), and I’ll run the appropriate checks there and fix anything that fails.
